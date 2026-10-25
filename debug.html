@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Debug Embedded - ESP32 Health</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 20px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    h1 { font-size: 22px; color: #38bdf8; }
+    a.back { color: #94a3b8; text-decoration: none; font-size: 14px; }
+    a.back:hover { color: #38bdf8; }
+    .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    select, button {
+      background: #1e293b;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:hover { border-color: #38bdf8; }
+    #fbStatus { font-size: 13px; color: #94a3b8; margin-bottom: 16px; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+    .panel {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 16px;
+      min-width: 0;
+    }
+    .panel h2 {
+      font-size: 15px;
+      color: #f1f5f9;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #334155;
+    }
+    .full { grid-column: 1 / -1; }
+
+    /* Log ala Serial Monitor */
+    .console {
+      background: #020617;
+      color: #a7f3d0;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+      height: 340px;
+      overflow-y: auto;
+      padding: 12px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .console .ts   { color: #64748b; }
+    .console .info { color: #7dd3fc; }
+    .console .warn { color: #facc15; }
+    .console .err  { color: #f87171; }
+
+    /* Health check */
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #334155; }
+    th { color: #94a3b8; font-weight: 600; }
+    .tag {
+      font-size: 12px;
+      font-weight: bold;
+      padding: 3px 9px;
+      border-radius: 10px;
+    }
+    .OK   { background: #14532d; color: #4ade80; }
+    .WARN { background: #713f12; color: #facc15; }
+    .FAIL { background: #7f1d1d; color: #fca5a5; }
+    .NA   { background: #334155; color: #94a3b8; }
+
+    /* Raw JSON */
+    pre {
+      background: #020617;
+      color: #e2e8f0;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+      padding: 12px;
+      border-radius: 8px;
+      max-height: 340px;
+      overflow: auto;
+    }
+
+    .summary { font-size: 14px; line-height: 1.8; }
+    .summary b { color: #94a3b8; font-weight: normal; display: inline-block; width: 130px; }
+
+    @media (max-width: 800px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div>
+      <a class="back" href="index.html">← Kembali ke menu</a>
+      <h1>🔧 Debug Embedded</h1>
+    </div>
+    <div class="toolbar">
+      <select id="deviceSelect"><option>Memuat...</option></select>
+      <button id="btnPause">⏸ Pause log</button>
+      <button id="btnClear">🧹 Bersihkan</button>
+      <button id="btnCopy">📋 Salin JSON</button>
+    </div>
+  </header>
+
+  <div id="fbStatus">Firebase: memeriksa...</div>
+
+  <div class="layout">
+
+    <div class="panel">
+      <h2>Ringkasan Perangkat</h2>
+      <div id="summary" class="summary">Pilih perangkat...</div>
+    </div>
+
+    <div class="panel">
+      <h2>Health Check</h2>
+      <table>
+        <thead>
+          <tr><th>Komponen</th><th>Nilai</th><th>Status</th></tr>
+        </thead>
+        <tbody id="healthBody"></tbody>
+      </table>
+    </div>
+
+    <div class="panel full">
+      <h2>Serial Log (Live dari Firebase)</h2>
+      <div id="console" class="console"></div>
+    </div>
+
+    <div class="panel full">
+      <h2>Raw JSON (/devices/&lt;id&gt;)</h2>
+      <pre id="rawJson">-</pre>
+    </div>
+
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+    import { firebaseConfig, THRESHOLDS as T } from "./firebase-config.js";
+
+    const db = getDatabase(initializeApp(firebaseConfig));
+
+    const $ = (id) => document.getElementById(id);
+    const consoleEl = $("console");
+    const selectEl  = $("deviceSelect");
+
+    let devices = {};
+    let received = {};
+    let selected = null;
+    let paused = false;
+    let lastSnapshot = {};
+
+    // ---------- LOG ----------
+    function log(msg, level = "info") {
+      if (paused) return;
+      const t = new Date().toLocaleTimeString();
+      const line = document.createElement("div");
+      line.innerHTML = `<span class="ts">[${t}]</span> <span class="${level}">${msg}</span>`;
+      consoleEl.appendChild(line);
+      if (consoleEl.childNodes.length > 500) consoleEl.removeChild(consoleEl.firstChild);
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+
+    // Log hanya field yang berubah (seperti debug serial)
+    function logChanges(id, d) {
+      const flat = {
+        "rssi":          d.wifi?.rssi,
+        "reconnects":    d.wifi?.reconnects,
+        "free_heap":     d.memory?.free_heap,
+        "min_free_heap": d.memory?.min_free_heap,
+        "temp_c":        d.chip?.temp_c,
+        "uptime_s":      d.uptime_s
+      };
+      const prev = lastSnapshot[id] || {};
+      const changed = [];
+      for (const k in flat) {
+        if (prev[k] !== flat[k]) changed.push(`${k}=${flat[k]}`);
+      }
+      if (changed.length) {
+        log(`[${id}] ${changed.join(" | ")}`);
+      }
+      lastSnapshot[id] = flat;
+    }
+
+    // ---------- HEALTH CHECK ----------
+    function check(value, warnFn, failFn) {
+      if (value === undefined || value === null) return "NA";
+      if (failFn(value)) return "FAIL";
+      if (warnFn(value)) return "WARN";
+      return "OK";
+    }
+
+    function runHealthChecks(id, d) {
+      const age = Date.now() - (received[id] || 0);
+      const rssi = d.wifi?.rssi;
+      const heap = d.memory?.free_heap;
+      const minHeap = d.memory?.min_free_heap;
+      const temp = d.chip?.temp_c;
+      const recon = d.wifi?.reconnects;
+
+      return [
+        {
+          name: "Koneksi data (online)",
+          value: (age / 1000).toFixed(1) + " s lalu",
+          status: age > T.staleMs ? "FAIL" : "OK"
+        },
+        {
+          name: "WiFi RSSI",
+          value: rssi !== undefined ? rssi + " dBm" : "-",
+          status: check(rssi, v => v < T.rssiWarn, v => v < T.rssiFail)
+        },
+        {
+          name: "Free heap",
+          value: heap !== undefined ? heap.toLocaleString() + " B" : "-",
+          status: check(heap, v => v < T.freeHeapWarn, v => v < T.freeHeapFail)
+        },
+        {
+          name: "Min free heap",
+          value: minHeap !== undefined ? minHeap.toLocaleString() + " B" : "-",
+          status: check(minHeap, v => v < T.minHeapWarn, v => v < T.minHeapWarn / 2)
+        },
+        {
+          name: "Suhu chip",
+          value: temp !== undefined ? temp.toFixed(1) + " °C" : "-",
+          status: check(temp, v => v > T.tempWarn, v => v > T.tempFail)
+        },
+        {
+          name: "Jumlah reconnect WiFi",
+          value: recon !== undefined ? recon : "-",
+          status: check(recon, v => v >= T.reconnectWarn, v => v >= T.reconnectFail)
+        }
+      ];
+    }
+
+    function renderHealth(id, d) {
+      const rows = runHealthChecks(id, d);
+      $("healthBody").innerHTML = rows.map(r => `
+        <tr>
+          <td>${r.name}</td>
+          <td>${r.value}</td>
+          <td><span class="tag ${r.status}">${r.status}</span></td>
+        </tr>`).join("");
+    }
+
+    // ---------- RINGKASAN ----------
+    function heapPercent(d) {
+      if (!d.memory?.total_heap) return 0;
+      const used = d.memory.total_heap - d.memory.free_heap;
+      return Math.round((used / d.memory.total_heap) * 100);
+    }
+
+    function renderSummary(id, d) {
+      const chipInfo = d.chip
+        ? `${d.chip.model} • ${d.chip.cores} core • ${d.chip.cpu_mhz} MHz`
+        : "-";
+      $("summary").innerHTML = `
+        <div><b>Device ID</b> ${id}</div>
+        <div><b>Nama</b> ${d.device_name || "-"}</div>
+        <div><b>Mode</b> ${d.mode || "-"}</div>
+        <div><b>Chip</b> ${chipInfo}</div>
+        <div><b>SDK</b> ${d.chip?.sdk || "-"}</div>
+        <div><b>Flash</b> ${d.chip?.flash_size ? (d.chip.flash_size / 1024 / 1024) + " MB" : "-"}</div>
+        <div><b>WiFi SSID</b> ${d.wifi?.ssid || "-"}</div>
+        <div><b>IP</b> ${d.wifi?.ip || "-"}</div>
+        <div><b>Uptime</b> ${d.uptime_s !== undefined ? d.uptime_s + " detik" : "-"}</div>
+        <div><b>Pemakaian heap</b> ${heapPercent(d)}%</div>
+      `;
+    }
+
+    // ---------- PILIH DEVICE ----------
+    function renderSelect() {
+      const ids = Object.keys(devices);
+      if (ids.length === 0) {
+        selectEl.innerHTML = `<option>Belum ada perangkat</option>`;
+        selected = null;
+        return;
+      }
+      selectEl.innerHTML = ids.map(id =>
+        `<option value="${id}" ${id === selected ? "selected" : ""}>${devices[id].device_name || id}</option>`
+      ).join("");
+      if (!selected || !devices[selected]) {
+        selected = ids[0];
+        selectEl.value = selected;
+      }
+    }
+
+    selectEl.addEventListener("change", () => {
+      selected = selectEl.value;
+      log(`Memilih perangkat: ${selected}`, "warn");
+      renderAll();
+    });
+
+    function renderAll() {
+      if (!selected || !devices[selected]) return;
+      const d = devices[selected];
+      renderSummary(selected, d);
+      renderHealth(selected, d);
+      $("rawJson").textContent = JSON.stringify(d, null, 2);
+    }
+
+    // ---------- FIREBASE LISTENERS ----------
+    onValue(ref(db, ".info/connected"), (snap) => {
+      const ok = snap.val() === true;
+      $("fbStatus").textContent = ok ? "🟢 Firebase: terhubung" : "🔴 Firebase: tidak terhubung";
+      log(ok ? "Firebase terhubung" : "Firebase terputus", ok ? "info" : "err");
+    });
+
+    onValue(ref(db, "devices"), (snap) => {
+      devices = snap.val() || {};
+      const now = Date.now();
+      Object.keys(devices).forEach(id => {
+        received[id] = now;
+        if (id === selected) logChanges(id, devices[id]);
+      });
+      renderSelect();
+      renderAll();
+    }, (err) => {
+      log("Error baca database: " + err.message, "err");
+    });
+
+    // Refresh status "terakhir diterima" setiap detik
+    setInterval(() => {
+      if (selected && devices[selected]) renderHealth(selected, devices[selected]);
+    }, 1000);
+
+    // ---------- TOOLBAR ----------
+    $("btnPause").addEventListener("click", (e) => {
+      paused = !paused;
+      e.target.textContent = paused ? "▶ Lanjut log" : "⏸ Pause log";
+      log(paused ? "Log di-pause" : "Log dilanjutkan", "warn");
+    });
+
+    $("btnClear").addEventListener("click", () => { consoleEl.innerHTML = ""; });
+
+    $("btnCopy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText($("rawJson").textContent);
+        log("JSON disalin ke clipboard", "info");
+      } catch {
+        log("Gagal menyalin JSON", "err");
+      }
+    });
+
+    log("Halaman debug dibuka. Menunggu data...");
+  </script>
+
+</body>
+</html>

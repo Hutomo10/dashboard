@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 Health Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 20px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    h1 { font-size: 24px; color: #38bdf8; }
+    .nav a {
+      color: #94a3b8;
+      text-decoration: none;
+      font-size: 14px;
+      margin-left: 14px;
+    }
+    .nav a:hover { color: #38bdf8; }
+    #conn { font-size: 14px; color: #94a3b8; margin-top: 4px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 18px;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .name { font-weight: bold; font-size: 17px; }
+    .sub  { font-size: 12px; color: #64748b; margin-bottom: 12px; }
+
+    .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+    .badge {
+      font-size: 11px;
+      padding: 3px 9px;
+      border-radius: 20px;
+      font-weight: bold;
+      white-space: nowrap;
+    }
+    .online   { background: #14532d; color: #4ade80; }
+    .offline  { background: #7f1d1d; color: #fca5a5; }
+    .modebadge{ background: #1e3a5f; color: #7dd3fc; }
+    .health-OK   { background: #14532d; color: #4ade80; }
+    .health-WARN { background: #713f12; color: #facc15; }
+    .health-FAIL { background: #7f1d1d; color: #fca5a5; }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .stat {
+      background: #0f172a;
+      border-radius: 8px;
+      padding: 10px;
+      text-align: center;
+    }
+    .stat small { display: block; color: #94a3b8; font-size: 11px; }
+    .stat strong { font-size: 18px; }
+    .stat.warn strong { color: #facc15; }
+    .stat.fail strong { color: #f87171; }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      font-size: 13px;
+      border-bottom: 1px solid #1f2d3f;
+    }
+    .row span:first-child { color: #94a3b8; }
+
+    .bar {
+      height: 8px;
+      background: #334155;
+      border-radius: 6px;
+      overflow: hidden;
+      margin: 8px 0 12px;
+    }
+    .bar > div { height: 100%; background: #38bdf8; transition: width .5s; }
+
+    .chart-box {
+      height: 120px;
+      margin-top: 10px;
+    }
+
+    .empty {
+      text-align: center;
+      padding: 40px;
+      color: #64748b;
+      grid-column: 1 / -1;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div>
+      <h1>📊 ESP32 Health Dashboard</h1>
+      <div id="conn">Menghubungkan ke database...</div>
+    </div>
+    <nav class="nav">
+      <a href="index.html">← Menu</a>
+      <a href="debug.html">🔧 Debug</a>
+    </nav>
+  </header>
+
+  <div id="devices" class="grid">
+    <div class="empty">Menunggu data dari perangkat...</div>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+    import { firebaseConfig, THRESHOLDS as T } from "./firebase-config.js";
+
+    const db = getDatabase(initializeApp(firebaseConfig));
+    const container = document.getElementById("devices");
+    const conn = document.getElementById("conn");
+
+    const MAX_POINTS = 60;          // 60 titik x 5 detik = 5 menit
+    let devices  = {};
+    let received = {};              // waktu browser menerima data terakhir (ms)
+    let history  = {};              // riwayat per device
+    let charts   = {};              // instance Chart.js per device
+
+    onValue(ref(db, "devices"), (snap) => {
+      devices = snap.val() || {};
+      const now = Date.now();
+
+      Object.keys(devices).forEach(id => {
+        // Catat riwayat hanya jika data baru (last_seen_ms berubah)
+        const prevSeen = history[id]?.lastSeen;
+        const curSeen  = devices[id].last_seen_ms;
+        if (curSeen !== prevSeen) {
+          received[id] = now;
+          pushHistory(id, devices[id], now);
+        }
+      });
+
+      conn.textContent = "Terhubung • update terakhir " + new Date().toLocaleTimeString();
+      render();
+    }, (err) => {
+      conn.textContent = "Error: " + err.message;
+    });
+
+    // Render ulang tiap detik agar status ONLINE/OFFLINE ikut berubah
+    setInterval(render, 1000);
+
+    // ---------- RIWAYAT ----------
+    function pushHistory(id, d, now) {
+      if (!history[id]) {
+        history[id] = { labels: [], rssi: [], heap: [], lastSeen: null };
+      }
+      const h = history[id];
+      h.lastSeen = d.last_seen_ms;
+      h.labels.push(new Date(now).toLocaleTimeString());
+      h.rssi.push(d.wifi?.rssi ?? null);
+      h.heap.push(d.memory?.free_heap ?? null);
+
+      if (h.labels.length > MAX_POINTS) {
+        h.labels.shift();
+        h.rssi.shift();
+        h.heap.shift();
+      }
+    }
+
+    // ---------- HEALTH CHECK (sama dengan debug.html) ----------
+    function check(value, warnFn, failFn) {
+      if (value === undefined || value === null) return "NA";
+      if (failFn(value)) return "FAIL";
+      if (warnFn(value)) return "WARN";
+      return "OK";
+    }
+
+    function overallHealth(d, isOnline) {
+      if (!isOnline) return "FAIL";
+      const results = [
+        check(d.wifi?.rssi,            v => v < T.rssiWarn,       v => v < T.rssiFail),
+        check(d.memory?.free_heap,     v => v < T.freeHeapWarn,   v => v < T.freeHeapFail),
+        check(d.memory?.min_free_heap, v => v < T.minHeapWarn,    v => v < T.minHeapWarn / 2),
+        check(d.chip?.temp_c,          v => v > T.tempWarn,       v => v > T.tempFail),
+        check(d.wifi?.reconnects,      v => v >= T.reconnectWarn, v => v >= T.reconnectFail)
+      ];
+      if (results.includes("FAIL")) return "FAIL";
+      if (results.includes("WARN")) return "WARN";
+      return "OK";
+    }
+
+    // ---------- HELPERS ----------
+    function heapPercent(d) {
+      if (!d.memory?.total_heap) return 0;
+      const used = d.memory.total_heap - d.memory.free_heap;
+      return Math.round((used / d.memory.total_heap) * 100);
+    }
+
+    function fmtUptime(s) {
+      if (s === undefined) return "-";
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      return `${h}j ${m}m ${sec}d`;
+    }
+
+    function statClass(value, warnFn, failFn) {
+      if (value === undefined || value === null) return "";
+      if (failFn(value)) return "fail";
+      if (warnFn(value)) return "warn";
+      return "";
+    }
+
+    // ---------- RENDER ----------
+    function render() {
+      const ids = Object.keys(devices);
+      if (ids.length === 0) {
+        container.innerHTML = '<div class="empty">Belum ada perangkat terdaftar.</div>';
+        return;
+      }
+
+      container.innerHTML = ids.map(id => {
+        const d = devices[id];
+        const age = Date.now() - (received[id] || 0);
+        const isOnline = age <= T.staleMs;
+        const health = overallHealth(d, isOnline);
+        const heap = heapPercent(d);
+        const rssi = d.wifi?.rssi;
+        const temp = d.chip?.temp_c;
+
+        const rssiCls = statClass(rssi, v => v < T.rssiWarn, v => v < T.rssiFail);
+        const tempCls = statClass(temp, v => v > T.tempWarn, v => v > T.tempFail);
+
+        return `
+          <div class="card" data-id="${id}">
+            <div class="card-head">
+              <div class="name">📟 ${d.device_name || id}</div>
+              <div class="badges">
+                <span class="badge ${isOnline ? "online" : "offline"}">${isOnline ? "ONLINE" : "OFFLINE"}</span>
+                <span class="badge health-${health}">${health}</span>
+              </div>
+            </div>
+            <div class="sub">
+              ID: ${id} • Mode: <span class="badge modebadge">${d.mode || "-"}</span>
+              • Terakhir: ${isOnline ? Math.floor(age / 1000) + " dtk lalu" : "tidak ada data"}
+            </div>
+
+            <div class="stats">
+              <div class="stat ${rssiCls}">
+                <small>RSSI</small>
+                <strong>${rssi ?? "-"}</strong>
+              </div>
+              <div class="stat ${tempCls}">
+                <small>Suhu °C</small>
+                <strong>${temp !== undefined ? temp.toFixed(1) : "-"}</strong>
+              </div>
+              <div class="stat">
+                <small>Reconnect</small>
+                <strong>${d.wifi?.reconnects ?? "-"}</strong>
+              </div>
+            </div>
+
+            <div class="row"><span>Uptime</span><span>${fmtUptime(d.uptime_s)}</span></div>
+            <div class="row"><span>WiFi</span><span>${d.wifi?.ssid || "-"} (${d.wifi?.ip || "-"})</span></div>
+            <div class="row"><span>Free heap</span><span>${d.memory?.free_heap?.toLocaleString() ?? "-"} B</span></div>
+            <div class="row"><span>Min free heap</span><span>${d.memory?.min_free_heap?.toLocaleString() ?? "-"} B</span></div>
+            <div class="row"><span>Chip</span><span>${d.chip?.model || "-"} • ${d.chip?.cpu_mhz || "-"} MHz</span></div>
+
+            <div class="row" style="border:none;margin-top:6px"><span>Pemakaian heap</span><span>${heap}%</span></div>
+            <div class="bar"><div style="width:${heap}%"></div></div>
+
+            <div class="chart-box"><canvas id="chart-${id}"></canvas></div>
+          </div>`;
+      }).join("");
+
+      ids.forEach(id => drawChart(id));
+    }
+
+    // ---------- GRAFIK ----------
+    function drawChart(id) {
+      const h = history[id];
+      const canvas = document.getElementById(`chart-${id}`);
+      if (!h || !canvas) return;
+
+      if (!charts[id]) {
+        charts[id] = new Chart(canvas, {
+          type: "line",
+          data: {
+            labels: h.labels,
+            datasets: [
+              { label: "RSSI (dBm)", data: h.rssi, borderColor: "#4ade80", yAxisID: "y", tension: .3, pointRadius: 0 },
+              { label: "Free heap (KB)", data: h.heap.map(v => v / 1024), borderColor: "#38bdf8", yAxisID: "y1", tension: .3, pointRadius: 0 }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: { legend: { labels: { color: "#94a3b8", boxWidth: 12 } } },
+            scales: {
+              x:  { ticks: { color: "#64748b", maxTicksLimit: 5 }, grid: { color: "#1f2d3f" } },
+              y:  { position: "left",  ticks: { color: "#4ade80" }, grid: { color: "#1f2d3f" } },
+              y1: { position: "right", ticks: { color: "#38bdf8" }, grid: { drawOnChartArea: false } }
+            }
+          }
+        });
+      } else {
+        const c = charts[id];
+        c.data.labels = h.labels;
+        c.data.datasets[0].data = h.rssi;
+        c.data.datasets[1].data = h.heap.map(v => v / 1024);
+        c.update("none");
+      }
+    }
+  </script>
+
+</body>
+</html>

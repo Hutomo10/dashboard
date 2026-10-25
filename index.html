@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 Health Monitor - Menu</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    h1 { color: #38bdf8; margin-bottom: 6px; }
+    .sub { color: #94a3b8; margin-bottom: 20px; }
+    #fbStatus {
+      font-size: 14px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      background: #1e293b;
+      margin-bottom: 30px;
+    }
+    .menu {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px;
+      width: 100%;
+      max-width: 720px;
+    }
+    .menu a {
+      text-decoration: none;
+      color: inherit;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 14px;
+      padding: 28px 22px;
+      transition: transform .2s, border-color .2s;
+    }
+    .menu a:hover { transform: translateY(-4px); border-color: #38bdf8; }
+    .icon { font-size: 40px; margin-bottom: 12px; }
+    .menu h2 { font-size: 20px; margin-bottom: 8px; color: #f1f5f9; }
+    .menu p { font-size: 14px; color: #94a3b8; line-height: 1.5; }
+    .step {
+      display: inline-block;
+      margin-top: 14px;
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      background: #0f172a;
+      color: #facc15;
+    }
+    footer { margin-top: 40px; font-size: 12px; color: #64748b; }
+  </style>
+</head>
+<body>
+
+  <h1>🩺 ESP32 Health Monitor</h1>
+  <p class="sub">Pilih menu di bawah ini</p>
+
+  <div id="fbStatus">Firebase: memeriksa koneksi...</div>
+
+  <div class="menu">
+    <a href="debug.html">
+      <div class="icon">🔧</div>
+      <h2>Debug Embedded</h2>
+      <p>Lihat data mentah dari ESP32, log seperti Serial Monitor, dan pengecekan kesehatan tiap komponen. Disarankan dibuka dulu.</p>
+      <span class="step">Langkah 1</span>
+    </a>
+
+    <a href="dashboard.html">
+      <div class="icon">📊</div>
+      <h2>Dashboard</h2>
+      <p>Tampilan monitoring real-time yang terhubung langsung ke Firebase untuk semua perangkat.</p>
+      <span class="step">Langkah 2</span>
+    </a>
+  </div>
+
+  <footer>Data real-time dari Firebase Realtime Database</footer>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+    import { firebaseConfig } from "./firebase-config.js";
+
+    const db = getDatabase(initializeApp(firebaseConfig));
+    const status = document.getElementById("fbStatus");
+
+    // .info/connected adalah path khusus Firebase untuk status koneksi browser
+    onValue(ref(db, ".info/connected"), (snap) => {
+      if (snap.val() === true) {
+        status.textContent = "🟢 Firebase: terhubung";
+        status.style.color = "#4ade80";
+      } else {
+        status.textContent = "🔴 Firebase: tidak terhubung";
+        status.style.color = "#f87171";
+      }
+    });
+  </script>
+
+</body>
+</html>
